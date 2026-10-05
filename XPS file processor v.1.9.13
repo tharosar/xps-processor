@@ -1,0 +1,311 @@
+' XPS File Processor v1.9.13 by Tharosa Rajaratne, 2025
+' Zaera Group, Department of Chemistry, University of California Riverside
+'
+' - Processes all .1 files in chosen folder
+' - Converts counts to CPS, subtracts MCD baseline, converts back
+' - Writes processed files into a subfolder named "[SelectedFolderName] BG" inside the selected folder
+' - Logs processing details with timestamp
+' - Skips files already processed (those with BG versions)
+' - Can be restarted for another folder after completion
+' - STOP.TXT in folder halts execution immediately
+' - Silent processing: no per-file message boxes (runs in background)
+' - Auto-disappearing progress popup: at 10th file and then every 5 sec if total files >10
+
+Option Explicit
+
+Dim continueProcessing
+continueProcessing = True
+
+Do While continueProcessing
+    Call MainProcess()
+    If MsgBox("Process another folder?", vbYesNo + vbQuestion, "XPS File Processor") = vbNo Then
+        continueProcessing = False
+    End If
+Loop
+
+MsgBox "Exiting XPS File Processor. Goodbye!", vbInformation, "XPS File Processor"
+WScript.Quit
+
+' ==============================================================
+
+Sub MainProcess()
+    Dim startTime, fso, folder, files
+    Dim inputFolder, fileCount, i, killFilePath
+    Dim file, logTS, logFilePath, logDate
+    Dim userResponse, MCD
+
+    startTime = Now
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' === Ask user to enter folder path ===
+    inputFolder = InputBox("Enter the full path to the folder containing .1 files:", _
+                           "XPS File Processor", fso.GetAbsolutePathName("."))
+    If Trim(inputFolder) = "" Then
+        MsgBox "No folder specified. Returning to main menu.", vbExclamation, "XPS File Processor"
+        Exit Sub
+    End If
+
+    If Not fso.FolderExists(inputFolder) Then
+        MsgBox "Folder does not exist. Returning to main menu.", vbExclamation, "XPS File Processor"
+        Exit Sub
+    End If
+
+    ' === Build output BG folder INSIDE selected folder, named "[SelectedFolderName] BG" ===
+    Dim folderName, outputFolder
+    folderName = fso.GetFileName(inputFolder)
+    If Trim(folderName) = "" Then
+        MsgBox "Unable to determine folder name. Returning to main menu.", vbCritical, "XPS File Processor"
+        Exit Sub
+    End If
+    outputFolder = fso.BuildPath(inputFolder, folderName & " BG")
+
+    If Not fso.FolderExists(outputFolder) Then
+        On Error Resume Next
+        fso.CreateFolder outputFolder
+        If Err.Number <> 0 Then
+            MsgBox "Failed to create output folder inside the selected folder: " & Err.Description, vbCritical, "XPS File Processor"
+            Err.Clear
+            Exit Sub
+        End If
+        On Error GoTo 0
+    End If
+
+    ' Confirm folders to user
+    If MsgBox("Input folder:" & vbCrLf & inputFolder & vbCrLf & vbCrLf & _
+              "Output folder will be:" & vbCrLf & outputFolder & vbCrLf & vbCrLf & _
+              "Proceed?", vbYesNo + vbQuestion, "Confirm") = vbNo Then
+        MsgBox "Cancelled. Returning to main menu.", vbInformation, "XPS File Processor"
+        Exit Sub
+    End If
+
+    killFilePath = fso.BuildPath(inputFolder, "STOP.TXT")
+
+    ' === Create log file in the output folder ===
+    Dim logTime, ampm, hour12
+    logDate = Right("0" & Month(Now),2) & Right("0" & Day(Now),2) & Right(Year(Now),2)
+    If Hour(Now) >= 12 Then ampm = " PM" Else ampm = " AM"
+    hour12 = Hour(Now) Mod 12
+    If hour12 = 0 Then hour12 = 12
+    logTime = Right("0" & hour12,2) & Right("0" & Minute(Now),2) & ampm
+    logFilePath = fso.BuildPath(outputFolder, "XPS BG Log " & logDate & " " & logTime & ".txt")
+
+    Set logTS = fso.CreateTextFile(logFilePath, True)
+    logTS.WriteLine "XPS File Processor Log - " & Now
+    logTS.WriteLine "Input: " & inputFolder
+    logTS.WriteLine "Output: " & outputFolder
+    logTS.WriteLine String(50, "-")
+
+    ' === Collect all .1 files ===
+    Set folder = fso.GetFolder(inputFolder)
+    Set files = folder.Files
+
+    Dim allFiles(), fileIndex
+    fileIndex = 0
+    For Each file In files
+        If LCase(Trim(fso.GetExtensionName(file.Name))) = "1" Then
+            ReDim Preserve allFiles(fileIndex)
+            allFiles(fileIndex) = file.Path
+            fileIndex = fileIndex + 1
+        End If
+    Next
+
+    If fileIndex = 0 Then
+        MsgBox "No .1 files found in the selected folder.", vbInformation, "XPS File Processor"
+        logTS.WriteLine "No .1 files found. Aborting."
+        logTS.Close
+        Exit Sub
+    End If
+
+    ' === Detect BG pairs (skip) ===
+    Dim skipDict : Set skipDict = CreateObject("Scripting.Dictionary")
+    Dim hasBGCount : hasBGCount = 0
+    Dim j, fname, fnameNoExt, rootName
+    For j = 0 To UBound(allFiles)
+        fname = fso.GetFileName(allFiles(j))
+        fnameNoExt = Trim(Left(fname, Len(fname) - Len(".1")))
+        If LCase(Right(fnameNoExt,3)) = " bg" Then
+            rootName = Trim(Left(fnameNoExt, Len(fnameNoExt) - 3))
+            If Not skipDict.Exists(rootName) Then skipDict(rootName) = True
+            If Not skipDict.Exists(fnameNoExt) Then skipDict(fnameNoExt) = True
+            hasBGCount = hasBGCount + 1
+        End If
+    Next
+
+    Dim fileArray(), validCount : validCount = 0
+    For j = 0 To UBound(allFiles)
+        fname = fso.GetFileName(allFiles(j))
+        fnameNoExt = Trim(Left(fname, Len(fname) - Len(".1")))
+        If Not skipDict.Exists(fnameNoExt) Then
+            ReDim Preserve fileArray(validCount)
+            fileArray(validCount) = allFiles(j)
+            validCount = validCount + 1
+        End If
+    Next
+
+    logTS.WriteLine "Found " & (UBound(allFiles) + 1) & " .1 files total."
+    logTS.WriteLine hasBGCount & " BG file(s) detected and skipped."
+    logTS.WriteLine validCount & " file(s) to be processed."
+    logTS.WriteLine String(50, "-")
+
+    If validCount = 0 Then
+        MsgBox "No unprocessed .1 files remain (BG pairs skipped).", vbInformation, "XPS File Processor"
+        logTS.WriteLine "No valid files to process. Exiting."
+        logTS.Close
+        Exit Sub
+    End If
+
+    ' === Final start confirmation ===
+    If MsgBox("About to process " & validCount & " file(s). Continue?", vbYesNo + vbQuestion, "Confirm") = vbNo Then
+        logTS.WriteLine "User cancelled processing before start."
+        logTS.Close
+        Exit Sub
+    End If
+
+    ' === MCD Handling ===
+    MCD = 110592000
+    If MsgBox("Current MCD = " & MCD & ". Keep?", vbYesNo + vbQuestion, "MCD") = vbNo Then
+        Dim newVal
+        newVal = InputBox("Enter MCD value:", "MCD Input", CStr(MCD))
+        If IsNumeric(newVal) Then
+            MCD = CDbl(newVal)
+            logTS.WriteLine "User set MCD to " & MCD
+        Else
+            logTS.WriteLine "Invalid MCD input; using default " & MCD
+        End If
+    Else
+        logTS.WriteLine "Using default MCD: " & MCD
+    End If
+
+    ' === Initialize progress timing ===
+    Dim lastProgressTime, progressStarted
+    lastProgressTime = 0
+    progressStarted = False
+    Dim wsh : Set wsh = CreateObject("WScript.Shell")
+
+    ' === Processing (silent with auto-progress) ===
+    Dim processedCount : processedCount = 0
+    For j = 0 To validCount - 1
+        If fso.FileExists(killFilePath) Then
+            logTS.WriteLine "STOP.TXT found. Aborted at " & Now
+            Exit For
+        End If
+
+        ProcessFile fileArray(j), fso, logTS, MCD, outputFolder
+        processedCount = processedCount + 1
+
+        ' --- Auto-disappearing progress popup ---
+        If validCount > 10 Then
+            If processedCount = 10 Then
+                wsh.Popup "Processing file 10 of " & validCount, 1, "XPS Processing", 64
+                lastProgressTime = Timer
+                progressStarted = True
+            ElseIf progressStarted Then
+                Dim nowTime
+                nowTime = Timer
+                If nowTime - lastProgressTime >= 5 Then
+                    lastProgressTime = nowTime
+                    wsh.Popup "Processing file " & processedCount & " of " & validCount, 1, "XPS Processing", 64
+                End If
+            End If
+        End If
+    Next
+
+    ' === Wrap-up ===
+    Dim endTime, totalSec, elapsedMin, elapsedSec
+    endTime = Now
+    totalSec = DateDiff("s", startTime, endTime)
+    elapsedMin = Int(totalSec / 60)
+    elapsedSec = totalSec Mod 60
+
+    MsgBox "Done. Processed " & processedCount & " file(s)." & vbCrLf & _
+           "Output in: " & outputFolder & vbCrLf & _
+           "Elapsed: " & elapsedMin & "m " & elapsedSec & "s", vbInformation, "XPS File Processor"
+
+    logTS.WriteLine "Processed " & processedCount & " file(s). Completed at " & Now
+    logTS.WriteLine "Elapsed: " & elapsedMin & " min " & elapsedSec & " sec"
+    logTS.Close
+End Sub
+
+' ==============================================================
+
+Sub ProcessFile(filePath, fso, logTS, MCD, outputFolder)
+    Dim inputTS, outputTS, line, trimmed
+    Dim filename, newFilename, outputFile
+    Dim headerVals, n, d, denom, cpsVal, cpsAdj, countsAdj
+
+    filename = fso.GetBaseName(filePath)
+    newFilename = filename & " BG." & fso.GetExtensionName(filePath)
+    outputFile = fso.BuildPath(outputFolder, newFilename)
+
+    On Error Resume Next
+    Set inputTS = fso.OpenTextFile(filePath, 1, False)
+    If Err.Number <> 0 Then
+        logTS.WriteLine "ERROR opening input: " & filePath & " | " & Err.Description
+        Err.Clear
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
+
+    Set outputTS = fso.CreateTextFile(outputFile, True)
+
+    logTS.WriteLine "Processing: " & filePath
+    denom = 0
+
+    Do While Not inputTS.AtEndOfStream
+        line = inputTS.ReadLine
+        trimmed = Trim(line)
+
+        headerVals = GetHeaderValues(trimmed)
+        If Not IsEmpty(headerVals) Then
+            n = headerVals(3)
+            d = headerVals(4)
+            If IsNumeric(n) And IsNumeric(d) Then
+                denom = d * n
+            Else
+                denom = 0
+            End If
+            outputTS.WriteLine line
+
+        ElseIf IsNumeric(trimmed) Then
+            If denom > 0 Then
+                cpsVal = CDbl(trimmed) / denom
+                cpsAdj = cpsVal - MCD
+                countsAdj = cpsAdj * denom
+                outputTS.WriteLine countsAdj
+            Else
+                outputTS.WriteLine trimmed
+            End If
+        Else
+            outputTS.WriteLine line
+        End If
+    Loop
+
+    inputTS.Close
+    outputTS.Close
+    logTS.WriteLine "  Wrote: " & outputFile
+End Sub
+
+' ==============================================================
+
+Function GetHeaderValues(line)
+    Dim rawParts, cleanParts, i, count, result
+    rawParts = Split(Replace(line, vbTab, " "))
+    ReDim cleanParts(7)
+    count = 0
+
+    For i = 0 To UBound(rawParts)
+        If Len(Trim(rawParts(i))) > 0 And IsNumeric(Trim(rawParts(i))) Then
+            cleanParts(count) = CDbl(Trim(rawParts(i)))
+            count = count + 1
+            If count = 8 Then Exit For
+        End If
+    Next
+
+    If count = 8 Then
+        result = cleanParts
+        GetHeaderValues = result
+    Else
+        GetHeaderValues = Empty
+    End If
+End Function
